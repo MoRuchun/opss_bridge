@@ -124,31 +124,43 @@ def BatchReadPEER(FileFolder, Scalsw=False, TargetPGA=0.5):
         for j in range(len(acceTemp)):
             acceTemp[j] = acceTemp[j][0:minLength]
 
-        # 以下程序用来识别水平方向和竖直方向地震波
-        acceTempCopy = np.copy(acceTemp)  # 复制加速度数组
-        acceTempNew = np.copy(acceTemp)
-        for k in range(len(acceTemp)):
-            ver_sw = (GMnameTemp[k].upper().endswith('UP') | GMnameTemp[k].upper().endswith('DWN') |
-                      GMnameTemp[k].upper().endswith('V') | GMnameTemp[k].upper().endswith('VER') |
-                      GMnameTemp[k].upper().endswith('UD'))  # 为True说明是竖向地震动
-            if ver_sw:
-                if k != (len(acceTemp) - 1):
-                    ver_acce = acceTemp[k]
-                    acceTempCopy = np.delete(acceTempCopy, k, axis=0)
-                    acceTempNew = np.array([*acceTempCopy, ver_acce])
-
+        # 识别水平和竖直方向，并确保文件名与数据同步重排
+        ver_indices = []
+        hor_indices = []
+        
+        for k in range(len(GMnameTemp)):
+            name = GMnameTemp[k].upper()
+            if name.endswith('UP') or name.endswith('DWN') or name.endswith('V') or name.endswith('VER') or name.endswith('UD'):
+                ver_indices.append(k)
+            else:
+                hor_indices.append(k)
+        
+        # 重排索引：水平在前，竖直在后
+        new_indices = hor_indices + ver_indices
+        
+        # 应用重排
+        acceTempNew = acceTemp[new_indices]
+        GMnameTempNew = GMnameTemp[new_indices]
+        
         # 将PGA最大的水平分量 排在第一列
-        if np.max(np.abs(acceTempNew[0])) < np.max(np.abs(acceTempNew[1])):
-            acceTempNew[[0, 1]] = acceTempNew[[1, 0]]
+        # 注意：这里假设前两个是水平分量
+        if len(hor_indices) >= 2:
+            if np.max(np.abs(acceTempNew[0])) < np.max(np.abs(acceTempNew[1])):
+                acceTempNew[[0, 1]] = acceTempNew[[1, 0]]
+                GMnameTempNew[[0, 1]] = GMnameTempNew[[1, 0]]
 
         # 如果没有竖向地震动，则将PGA较大的水平分量乘以0.65当做竖向分量
-        if len(acceTemp) == 2:
-            acceTempNew = np.array([*acceTempCopy, acceTempNew[0] * 0.65])
+        if len(acceTempNew) == 2:
+            # 创建合成竖向分量
+            syn_ver = acceTempNew[0] * 0.65
+            acceTempNew = np.array([acceTempNew[0], acceTempNew[1], syn_ver], dtype=object)
+            # 添加合成文件名
+            GMnameTempNew = np.append(GMnameTempNew, GMnameTempNew[0] + "_SynV")
 
         # 创建地震波的数据集，为一列表，列表的每个元素为一字典，包含各地震波的信息
         GMdata[i] = {'GMH1': acceTempNew[0], 'GMH2': acceTempNew[1], 'GMV3': acceTempNew[2],
                      'time': timeTemp[0][0:minLength], 'dt': dtTemp[0],
-                     'npts': minLength, 'RSN': rsnTemp[0], 'GMname': GMnameTemp}
+                     'npts': minLength, 'RSN': rsnTemp[0], 'GMname': GMnameTempNew}
 
         print('RSN={0} 已读取和存储完成，序号: {1}，共 {2} 条'.format(rsnTemp[0], i + 1, numRSN))
 
