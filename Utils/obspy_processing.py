@@ -148,7 +148,7 @@ def calculate_response_spectrum(acce, dt, periods, damping=0.05):
         k_eff = omega**2 + a0 + 2 * damping * omega * a1
         
         for j in range(npts - 1):
-            dp = -acce_ms2[j+1] + acce_ms2[j]
+            dp = acce_ms2[j+1] - acce_ms2[j]
             dp_eff = dp + a0 * u[j] + a2 * v[j] + a3 * a[j]
             dp_eff += 2 * damping * omega * (a1 * u[j] + a4 * v[j] + a5 * a[j])
             
@@ -317,13 +317,15 @@ def calculate_significant_duration(acce, dt, energy_threshold=(0.05, 0.95)):
     return t_start, t_end, duration
 
 
-def truncate_ground_motion(trace, energy_threshold=(0.05, 0.95)):
+def truncate_ground_motion(trace, energy_threshold=(0.05, 0.95), t_start=None, t_end=None):
     """
     截断地震波（保留主要能量部分）
     
     参数:
         trace: ObsPy Trace 对象
         energy_threshold: 能量阈值 (start_ratio, end_ratio)
+        t_start: 指定起始时间索引 (可选)
+        t_end: 指定结束时间索引 (可选)
     
     返回:
         trace_truncated: 截断后的 Trace 对象
@@ -333,7 +335,12 @@ def truncate_ground_motion(trace, energy_threshold=(0.05, 0.95)):
     acce = trace.data
     dt = trace.stats.delta
     
-    t_start, t_end, duration = calculate_significant_duration(acce, dt, energy_threshold)
+    if t_start is None or t_end is None:
+        t_start_calc, t_end_calc, duration = calculate_significant_duration(acce, dt, energy_threshold)
+        if t_start is None:
+            t_start = t_start_calc
+        if t_end is None:
+            t_end = t_end_calc
     
     # 截断数据
     trace_truncated = trace.copy()
@@ -363,7 +370,8 @@ def scale_to_pga(acce, target_pga):
 
 def process_ground_motion(acce, dt, baseline_method='linear', 
                          filter_freq=(0.1, 25.0), truncate=True,
-                         energy_threshold=(0.05, 0.95), resample_rate=None):
+                         energy_threshold=(0.05, 0.95), resample_rate=None,
+                         truncation_bounds=None):
     """
     完整的地震波预处理流程
     
@@ -375,6 +383,7 @@ def process_ground_motion(acce, dt, baseline_method='linear',
         truncate: 是否截断地震波
         energy_threshold: 能量阈值 (用于截断)
         resample_rate: 重采样率 (Hz, None表示不重采样)
+        truncation_bounds: 指定截断点 (t_start, t_end) 索引元组 (可选)
     
     返回:
         trace_processed: 处理后的 Trace 对象
@@ -398,8 +407,13 @@ def process_ground_motion(acce, dt, baseline_method='linear',
     
     # 截断
     if truncate:
+        t_start_in = None
+        t_end_in = None
+        if truncation_bounds is not None:
+            t_start_in, t_end_in = truncation_bounds
+
         trace_truncated, t_start, t_end = truncate_ground_motion(
-            trace_processed, energy_threshold
+            trace_processed, energy_threshold, t_start=t_start_in, t_end=t_end_in
         )
         processing_info['truncated'] = True
         processing_info['t_start'] = t_start
@@ -442,6 +456,9 @@ def export_processed_ground_motions(GMdata_list, pga_values, base_dir="ground_mo
         pga_dir = os.path.join(base_dir, f"PGA_{pga:.2f}g")
         os.makedirs(pga_dir, exist_ok=True)
         
+        # 统计信息
+        file_count = 0
+        
         for gm in GMdata_list:
             rsn = gm['RSN']
             gmnames = gm['GMname']
@@ -466,14 +483,22 @@ def export_processed_ground_motions(GMdata_list, pga_values, base_dir="ground_mo
                 else:
                     fname_base = f"RSN{rsn}_{comp_key}"
                 
-                output_path = os.path.join(pga_dir, f"{fname_base}.txt")
+                # 为每个分量创建子目录
+                component_dir = os.path.join(pga_dir, comp_key)
+                os.makedirs(component_dir, exist_ok=True)
+                output_path = os.path.join(component_dir, f"{fname_base}.txt")
                 
                 # 保存数据
                 data_to_save = np.column_stack((time, acce_scaled))
                 np.savetxt(output_path, data_to_save, fmt="%.8e", delimiter="\t",
                           header=f"Time(s)\tAcceleration(g)\tPGA={pga:.2f}g\tScale_Factor={scale_factor:.6f}")
+                
+                file_count += 1
         
-        print(f"PGA = {pga:.2f}g 的数据已导出至: {os.path.abspath(pga_dir)}")
+        print(f"PGA = {pga:.2f}g: 已导出 {file_count} 个文件至 {os.path.abspath(pga_dir)}")
+        print(f"  ├── H1/ ({len(GMdata_list)} 个文件)")
+        print(f"  ├── H2/ ({len(GMdata_list)} 个文件)")
+        print(f"  └── V3/ ({len(GMdata_list)} 个文件)")
 
 
 def plot_all_waveforms_comparison(traces_original_list, traces_processed_list, 
@@ -574,3 +599,99 @@ def plot_all_response_spectra(Sa_list, periods, rsn_list, pga_value=None, save_p
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
     
     plt.show()
+
+
+def plot_waveform_comparison_detailed(trace_original, trace_processed, 
+                                      rsn, processing_info=None, save_path=None):
+    """
+    绘制单条地震波处理前后的详细对比图
+    
+    参数:
+        trace_original: 原始 Trace 对象
+        trace_processed: 处理后 Trace 对象
+        rsn: RSN 编号
+        processing_info: 处理信息字典 (可选)
+        save_path: 保存路径 (可选)
+    """
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+    
+    # 子图1: 原始波形
+    time_orig = trace_original.times()
+    pga_orig = np.max(np.abs(trace_original.data))
+    axes[0].plot(time_orig, trace_original.data, 'b-', linewidth=0.8)
+    axes[0].set_ylabel('加速度 (g)', fontsize=11)
+    axes[0].set_title(f'RSN={rsn} - 原始波形 (PGA={pga_orig:.4f}g)', fontsize=12)
+    axes[0].grid(True, alpha=0.3)
+    axes[0].axhline(y=0, color='k', linestyle='--', linewidth=0.5, alpha=0.5)
+    
+    # 子图2: 处理后波形
+    time_proc = trace_processed.times()
+    pga_proc = np.max(np.abs(trace_processed.data))
+    axes[1].plot(time_proc, trace_processed.data, 'r-', linewidth=0.8)
+    axes[1].set_ylabel('加速度 (g)', fontsize=11)
+    
+    # 构建标题，包含处理信息
+    title = f'处理后波形 (PGA={pga_proc:.4f}g'
+    if processing_info:
+        if processing_info.get('truncated'):
+            duration = processing_info.get('duration', 0)
+            title += f', 持时={duration:.2f}s'
+        if processing_info.get('resampled'):
+            sr = processing_info.get('new_sampling_rate', 0)
+            title += f', 采样率={sr}Hz'
+    title += ')'
+    axes[1].set_title(title, fontsize=12)
+    axes[1].grid(True, alpha=0.3)
+    axes[1].axhline(y=0, color='k', linestyle='--', linewidth=0.5, alpha=0.5)
+    
+    # 子图3: 叠加对比（归一化）
+    # 为了更好的对比，将两个波形都归一化到相同的PGA
+    norm_factor = max(pga_orig, pga_proc)
+    axes[2].plot(time_orig, trace_original.data / norm_factor, 'b-', 
+                 linewidth=0.8, alpha=0.6, label=f'原始 (归一化)')
+    axes[2].plot(time_proc, trace_processed.data / norm_factor, 'r-', 
+                 linewidth=0.8, label=f'处理后 (归一化)')
+    axes[2].set_xlabel('时间 (s)', fontsize=11)
+    axes[2].set_ylabel('归一化加速度', fontsize=11)
+    axes[2].set_title('归一化对比', fontsize=12)
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend(fontsize=10)
+    axes[2].axhline(y=0, color='k', linestyle='--', linewidth=0.5, alpha=0.5)
+    
+    # 添加处理步骤说明
+    if processing_info:
+        info_text = '处理步骤:\n'
+        info_text += '1. 基线校正\n'
+        info_text += '2. 带通滤波\n'
+        if processing_info.get('truncated'):
+            info_text += '3. 能量截断\n'
+        if processing_info.get('resampled'):
+            info_text += '4. 重采样\n'
+        
+        fig.text(0.02, 0.02, info_text, fontsize=9, 
+                verticalalignment='bottom', bbox=dict(boxstyle='round', 
+                facecolor='wheat', alpha=0.3))
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    
+    plt.show()
+    
+    # 打印统计信息
+    print(f"\n{'='*60}")
+    print(f"RSN {rsn} 处理前后对比:")
+    print(f"{'='*60}")
+    print(f"原始波形:")
+    print(f"  - 时长: {time_orig[-1]:.2f} 秒")
+    print(f"  - 数据点数: {len(trace_original.data)}")
+    print(f"  - PGA: {pga_orig:.4f} g")
+    print(f"  - 采样率: {trace_original.stats.sampling_rate:.2f} Hz")
+    print(f"\n处理后波形:")
+    print(f"  - 时长: {time_proc[-1]:.2f} 秒")
+    print(f"  - 数据点数: {len(trace_processed.data)}")
+    print(f"  - PGA: {pga_proc:.4f} g")
+    print(f"  - 采样率: {trace_processed.stats.sampling_rate:.2f} Hz")
+    print(f"\nPGA变化: {((pga_proc - pga_orig) / pga_orig * 100):.2f}%")
+    print(f"{'='*60}\n")

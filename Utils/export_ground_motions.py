@@ -71,7 +71,9 @@ def export_ground_motions(GMdata, Target_GM=None, TargetPGA=None, base_dir="grou
                 fname_base = gmnames[i].split('/')[-1].split('\\')[-1]
                 if fname_base.endswith('.AT2'):
                     fname_base = fname_base[:-4]
-                output_path = os.path.join(scaled_dir, f"{fname_base}.txt")
+                component_dir = os.path.join(scaled_dir, comp_key)
+                os.makedirs(component_dir, exist_ok=True)
+                output_path = os.path.join(component_dir, f"{fname_base}.txt")
                 
                 data_to_save = np.column_stack((time, comp_data))
                 np.savetxt(output_path, data_to_save, fmt="%.8e", delimiter="\t")
